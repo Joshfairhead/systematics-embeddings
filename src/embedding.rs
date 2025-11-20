@@ -45,10 +45,12 @@ impl EmbeddingService {
 
         let input_ids = encoding.get_ids();
         let attention_mask = encoding.get_attention_mask();
+        let token_type_ids = encoding.get_type_ids();
 
         // Convert to i64 for ONNX (common requirement)
         let input_ids_i64: Vec<i64> = input_ids.iter().map(|&x| x as i64).collect();
         let attention_mask_i64: Vec<i64> = attention_mask.iter().map(|&x| x as i64).collect();
+        let token_type_ids_i64: Vec<i64> = token_type_ids.iter().map(|&x| x as i64).collect();
 
         // Run inference (lock the mutex to get mutable access)
         let mut session = self
@@ -58,6 +60,7 @@ impl EmbeddingService {
         let outputs: SessionOutputs = session.run(ort::inputs![
             "input_ids" => Value::from_array(([1, input_ids_i64.len()], input_ids_i64))?,
             "attention_mask" => Value::from_array(([1, attention_mask_i64.len()], attention_mask_i64))?,
+            "token_type_ids" => Value::from_array(([1, token_type_ids_i64.len()], token_type_ids_i64))?,
         ])?;
 
         // Extract embeddings (last_hidden_state)
