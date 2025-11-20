@@ -110,6 +110,14 @@ async fn health(State(_state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
+async fn model_info(State(_state): State<AppState>) -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "ok".to_string(),
+        model: "all-MiniLM-L6-v2".to_string(),
+        dimensions: 384,
+    })
+}
+
 async fn embed(
     State(state): State<AppState>,
     Json(payload): Json<EmbedRequest>,
@@ -185,6 +193,7 @@ async fn main() -> anyhow::Result<()> {
     // Build router
     let app = Router::new()
         .route("/health", get(health))
+        .route("/model", get(model_info))
         .route("/embed", post(embed))
         .route("/index", post(index_document))
         .route("/search", post(search))
