@@ -1,15 +1,16 @@
 use anyhow::Result;
-use ndarray::{Array, ArrayView};
+use ndarray::ArrayView;
 use ort::{
     session::{builder::GraphOptimizationLevel, Session, SessionOutputs},
     value::Value,
 };
 use std::path::PathBuf;
+use std::sync::Mutex;
 use tokenizers::Tokenizer;
 use tracing::info;
 
 pub struct EmbeddingService {
-    session: Session,
+    session: Mutex<Session>,
     tokenizer: Tokenizer,
 }
 
@@ -29,7 +30,10 @@ impl EmbeddingService {
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
 
-        Ok(Self { session, tokenizer })
+        Ok(Self {
+            session: Mutex::new(session),
+            tokenizer,
+        })
     }
 
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
@@ -46,8 +50,12 @@ impl EmbeddingService {
         let input_ids_i64: Vec<i64> = input_ids.iter().map(|&x| x as i64).collect();
         let attention_mask_i64: Vec<i64> = attention_mask.iter().map(|&x| x as i64).collect();
 
-        // Run inference
-        let outputs: SessionOutputs = self.session.run(ort::inputs![
+        // Run inference (lock the mutex to get mutable access)
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock session: {}", e))?;
+        let outputs: SessionOutputs = session.run(ort::inputs![
             "input_ids" => Value::from_array(([1, input_ids_i64.len()], input_ids_i64))?,
             "attention_mask" => Value::from_array(([1, attention_mask_i64.len()], attention_mask_i64))?,
         ])?;
