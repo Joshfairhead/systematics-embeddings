@@ -1,16 +1,16 @@
-use anyhow::{Context, Result};
-use ndarray::{Array, ArrayView};
+use anyhow::Result;
+use ndarray::ArrayView;
 use ort::{
-    session::{Session, SessionOutputs},
+    session::{builder::GraphOptimizationLevel, Session, SessionOutputs},
     value::Value,
-    GraphOptimizationLevel,
 };
 use std::path::PathBuf;
+use std::sync::Mutex;
 use tokenizers::Tokenizer;
 use tracing::info;
 
 pub struct EmbeddingService {
-    session: Session,
+    session: Mutex<Session>,
     tokenizer: Tokenizer,
 }
 
@@ -28,9 +28,12 @@ impl EmbeddingService {
         info!("Loading tokenizer");
         let tokenizer_path = Self::download_tokenizer().await?;
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
-            .context("Failed to load tokenizer")?;
+            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
 
-        Ok(Self { session, tokenizer })
+        Ok(Self {
+            session: Mutex::new(session),
+            tokenizer,
+        })
     }
 
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
@@ -38,27 +41,31 @@ impl EmbeddingService {
         let encoding = self
             .tokenizer
             .encode(text, false)
-            .context("Failed to tokenize")?;
+            .map_err(|e| anyhow::anyhow!("Failed to tokenize: {}", e))?;
 
         let input_ids = encoding.get_ids();
         let attention_mask = encoding.get_attention_mask();
 
-        // Convert to arrays
-        let input_ids_array = Array::from_shape_vec((1, input_ids.len()), input_ids.to_vec())?;
-        let attention_mask_array =
-            Array::from_shape_vec((1, attention_mask.len()), attention_mask.to_vec())?;
+        // Convert to i64 for ONNX (common requirement)
+        let input_ids_i64: Vec<i64> = input_ids.iter().map(|&x| x as i64).collect();
+        let attention_mask_i64: Vec<i64> = attention_mask.iter().map(|&x| x as i64).collect();
 
-        // Run inference
-        let outputs: SessionOutputs = self.session.run(ort::inputs![
-            "input_ids" => Value::from_array(input_ids_array)?,
-            "attention_mask" => Value::from_array(attention_mask_array)?,
-        ]?)?;
+        // Run inference (lock the mutex to get mutable access)
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock session: {}", e))?;
+        let outputs: SessionOutputs = session.run(ort::inputs![
+            "input_ids" => Value::from_array(([1, input_ids_i64.len()], input_ids_i64))?,
+            "attention_mask" => Value::from_array(([1, attention_mask_i64.len()], attention_mask_i64))?,
+        ])?;
 
         // Extract embeddings (last_hidden_state)
-        let embeddings = outputs[0]
-            .try_extract_tensor::<f32>()?
-            .view()
-            .to_owned();
+        let (shape, data) = outputs[0].try_extract_tensor::<f32>()?;
+
+        // Convert shape to Vec<usize> for ArrayView
+        let shape_vec: Vec<usize> = shape.iter().map(|&x| x as usize).collect();
+        let embeddings = ArrayView::from_shape(&shape_vec[..], data)?;
 
         // Mean pooling
         let pooled = self.mean_pooling(&embeddings, attention_mask);
